@@ -10,6 +10,7 @@ resource "azurerm_container_registry" "main" {
   sku                 = "Basic"
   admin_enabled       = false
 }
+
 resource "azurerm_kubernetes_cluster" "main" {
   name                = "aks-${var.project_name}"
   location            = azurerm_resource_group.main.location
@@ -21,6 +22,12 @@ resource "azurerm_kubernetes_cluster" "main" {
     name       = "default"
     node_count = 1
     vm_size    = var.node_vm_size
+
+    upgrade_settings {
+      max_surge                     = "10%"
+      drain_timeout_in_minutes      = 0
+      node_soak_duration_in_minutes = 0
+    }
   }
 
   identity {

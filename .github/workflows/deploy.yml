@@ -1,0 +1,106 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      acr_name: ${{ steps.tfout.outputs.acr_name }}
+      rg_name: ${{ steps.tfout.outputs.rg_name }}
+      aks_name: ${{ steps.tfout.outputs.aks_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Plan
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Apply
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Read outputs
+        id: tfout
+        run: |
+          echo "acr_name=$(terraform output -raw acr_name)" >> "$GITHUB_OUTPUT"
+          echo "rg_name=$(terraform output -raw resource_group_name)" >> "$GITHUB_OUTPUT"
+          echo "aks_name=$(terraform output -raw aks_name)" >> "$GITHUB_OUTPUT"
+
+  image:
+    runs-on: ubuntu-latest
+    needs: terraform
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Import petsitting image into ACR
+        run: |
+          az acr import \
+            --name ${{ needs.terraform.outputs.acr_name }} \
+            --source docker.io/nuelid/petsitting:v2 \
+            --image petsitting:v2 \
+            --force
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [terraform, image]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ needs.terraform.outputs.rg_name }} \
+            --name ${{ needs.terraform.outputs.aks_name }} \
+            --overwrite-existing
+
+      - name: Deploy manifests
+        run: kubectl apply -f k8s/
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/petsitting --timeout=180s
+
+      - name: Show service
+        run: kubectl get service petsitting

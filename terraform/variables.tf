@@ -17,3 +17,7 @@ variable "acr_name" {
   description = "Globally unique, 5-50 characters, lowercase letters and numbers only"
   default     = "acraksei1214"
 }
+variable "node_vm_size" {
+  type    = string
+  default = "Standard_B2s_v2"
+}
